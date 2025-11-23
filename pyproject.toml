@@ -1,0 +1,14 @@
+[project]
+name = "stock-simulation-game"
+version = "1.0.0"
+description = "Real-time stock investment simulation game using Yahoo Finance data."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "yfinance",
+    "pandas",
+    "matplotlib",
+]
+
+[tool.uv]
+dev-dependencies = []
