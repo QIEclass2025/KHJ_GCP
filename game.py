@@ -2,1236 +2,811 @@
 # -*- coding: utf-8 -*-
 
 """
-실시간 주식 투자 시뮬레이션 게임 (Finnhub API 활용)
-- 단일 파일로 구성된 포터블 코드
-- Finnhub 무료 API를 활용한 실시간 주가 및 뉴스
-- tkinter GUI 인터페이스
+실시간 주식 투자 시뮬레이션 게임 (Yahoo Finance 활용)
 """
 
 # ========== 1. 설정 및 임포트 ==========
 import sys
-import subprocess
 import tkinter as tk
-from tkinter import ttk, messagebox, scrolledtext
-
-# requests 모듈 자동 설치
-try:
-    import requests
-except ImportError:
-    print("requests 모듈이 설치되지 않았습니다. 자동으로 설치합니다...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages", "requests"])
-    import requests
-    print("requests 모듈 설치 완료!")
-
-# matplotlib 모듈 자동 설치
-try:
-    import matplotlib
-    matplotlib.use('TkAgg')
-    from matplotlib.figure import Figure
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-except ImportError:
-    print("matplotlib 모듈이 설치되지 않았습니다. 자동으로 설치합니다...")
-    subprocess.check_call([sys.executable, "-m", "pip", "install", "--break-system-packages", "matplotlib"])
-    import matplotlib
-    matplotlib.use('TkAgg')
-    from matplotlib.figure import Figure
-    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
-    print("matplotlib 모듈 설치 완료!")
-
-import json
-from datetime import datetime, timedelta
-import random
-import time
-from collections import deque, defaultdict
-import threading
-from typing import Dict, List, Optional, Tuple
+from tkinter import ttk, messagebox, scrolledtext, font
+import platform
 import os
+from datetime import datetime
+import random
+import threading
+from typing import Dict, List, Tuple
 
-# ========== 2. API 설정 ==========
-FINNHUB_API_KEY = "d3hkbh1r01qi2vu1akb0d3hkbh1r01qi2vu1akbg"  # 여기에 발급받은 API 키를 입력하세요!
-API_BASE_URL = "https://finnhub.io/api/v1"
+# 필수 라이브러리 확인
+try:
+    import matplotlib
+    import yfinance as yf
+    import pandas as pd
+    matplotlib.use('TkAgg')
+    from matplotlib.figure import Figure
+    from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg
+except ImportError:
+    error_message = ("필수 라이브러리(matplotlib, yfinance, pandas)가 설치되지 않았습니다.\n"
+                     "터미널에서 'pip install matplotlib yfinance pandas'를 실행해주세요.")
+    print(error_message)
+    sys.exit(1)
 
 # 게임 설정
-INITIAL_CASH = 10000.0
-POPULAR_STOCKS = ["AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", "NVDA", "META", "NFLX"]
-CACHE_DURATION = 60  # 캐시 유효 시간 (초)
-MAX_API_CALLS_PER_MINUTE = 60  # Finnhub 무료 제한
+INITIAL_CASH = 100000.0
+POPULAR_STOCKS = ["AAPL", "GOOGL", "MSFT", "AMZN", "TSLA", "NVDA", "META", "NFLX", "NUBURU"]
 
-# 게임 시간 설정
-GAME_START_DATE = datetime(2024, 1, 1, 9, 0)  # 게임 시작 시간: 2024년 1월 1일 오전 9시
-HOURS_PER_TICK = 3  # 한 턴당 3시간 진행
-MARKET_OPEN_HOUR = 9  # 시장 개장 시간
-MARKET_CLOSE_HOUR = 16  # 시장 마감 시간
+# ========== 2. 데이터 관리자 클래스 ==========
+class HistoricalDataManager:
+    def __init__(self, symbols):
+        self.symbols = symbols
+        self.data = {}
+        self.current_index = 0
+        self.dates = []
+        
+        print("📥 과거 데이터 다운로드 중... (잠시만 기다려주세요)")
+        self._download_data()
+        print("✅ 데이터 준비 완료!")
 
-# ========== 3. FinnhubAPI 클래스 ==========
-class FinnhubAPI:
-    """Finnhub API 호출 및 rate limiting, 캐싱 관리"""
+    def _download_data(self):
+        start_date = "2024-01-01"
+        end_date = "2024-12-31"
+        
+        for symbol in self.symbols:
+            try:
+                if symbol == "NUBURU":
+                    # Generate synthetic data for NUBURU
+                    # We need to know how many days. 2024 is a leap year, so 366 days.
+                    # However, trading days are fewer. Let's generate for the full range and filter or just generate enough.
+                    # yfinance history returns trading days.
+                    # To be safe and consistent with other stocks, let's download one real stock first to get the index,
+                    # or if NUBURU is the only one, we might need a calendar.
+                    # Assuming other stocks exist, we can use their index if available.
+                    # But to be robust, let's just generate for all days and let the game loop handle it,
+                    # OR better: wait until we have at least one real stock's data to copy the index.
+                    # If NUBURU is processed first, we might have an issue if we rely on others.
+                    # Let's generate a date range using pandas for business days in 2024.
+                    self.data[symbol] = self._generate_synthetic_data(symbol)
+                    if not self.dates and not self.data[symbol].empty:
+                         self.dates = self.data[symbol].index.strftime('%Y-%m-%d').tolist()
+                else:
+                    ticker = yf.Ticker(symbol)
+                    df = ticker.history(start=start_date, end=end_date, interval="1d")
+                    if not df.empty:
+                        self.data[symbol] = df
+                        if not self.dates:
+                            self.dates = df.index.strftime('%Y-%m-%d').tolist()
+            except Exception as e:
+                print(f"⚠️ {symbol} 데이터 다운로드 실패: {e}")
 
-    def __init__(self, api_key: str):
-        self.api_key = api_key
-        self.base_url = API_BASE_URL
-        self.cache = {}  # {endpoint: {'data': data, 'timestamp': timestamp}}
-        self.call_times = deque(maxlen=MAX_API_CALLS_PER_MINUTE)
-        self.offline_mode = False
+    def _generate_synthetic_data(self, symbol):
+        """
+        Generates synthetic data for a Meme Stock (Pump & Dump logic).
+        """
+        # Create a date range for 2024 business days
+        dates = pd.date_range(start="2024-01-01", end="2024-12-31", freq='B') # 'B' for business days
+        
+        # Initial Price
+        price = 1.00 # Start at $1.00 (Penny Stock)
+        
+        data = []
+        
+        for _ in dates:
+            # 1. Base Volatility (High Variance: 5% ~ 10%)
+            volatility = random.uniform(-0.10, 0.10)
+            
+            # 2. Jump Event (Pump: 1% prob, +30% ~ +100%)
+            if random.random() < 0.01:
+                volatility = random.uniform(0.30, 1.00)
+                
+            # 3. Crash Event (Dump: 1% prob, -30% ~ -50%)
+            elif random.random() < 0.01:
+                volatility = random.uniform(-0.50, -0.30)
+                
+            # Apply change
+            change = price * volatility
+            new_price = price + change
+            
+            # 4. Price Floor ($0.01)
+            new_price = max(0.01, new_price)
+            
+            # Generate OHLC (Simplified)
+            # Open is previous close (or close to it)
+            open_p = price
+            close_p = new_price
+            high_p = max(open_p, close_p) * (1 + random.uniform(0, 0.02))
+            low_p = min(open_p, close_p) * (1 - random.uniform(0, 0.02))
+            
+            data.append([open_p, high_p, low_p, close_p, 0, 0, 0]) # Volume, Dividends, Stock Splits = 0
+            
+            price = new_price
 
-    def _wait_if_rate_limited(self):
-        """Rate limit 관리 - 분당 60회 제한"""
-        now = time.time()
-        # 1분 이전 호출 제거
-        while self.call_times and self.call_times[0] < now - 60:
-            self.call_times.popleft()
+        # Create DataFrame
+        df = pd.DataFrame(data, index=dates, columns=["Open", "High", "Low", "Close", "Volume", "Dividends", "Stock Splits"])
+        df.index.name = "Date"
+        
+        return df
 
-        # 60회 도달 시 대기
-        if len(self.call_times) >= MAX_API_CALLS_PER_MINUTE:
-            wait_time = 60 - (now - self.call_times[0])
-            if wait_time > 0:
-                print(f"⏳ Rate limit 도달. {wait_time:.1f}초 대기 중...")
-                time.sleep(wait_time)
+    def get_current_date(self):
+        if self.dates and self.current_index < len(self.dates):
+            return self.dates[self.current_index]
+        return "2024-01-01"
 
-        self.call_times.append(time.time())
-
-    def _get_cached(self, cache_key: str) -> Optional[dict]:
-        """캐시에서 데이터 가져오기"""
-        if cache_key in self.cache:
-            cached = self.cache[cache_key]
-            if time.time() - cached['timestamp'] < CACHE_DURATION:
-                return cached['data']
-        return None
-
-    def _set_cache(self, cache_key: str, data: dict):
-        """캐시에 데이터 저장"""
-        self.cache[cache_key] = {
-            'data': data,
-            'timestamp': time.time()
+    def get_price_data(self, symbol):
+        if symbol not in self.data:
+            return None
+        df = self.data[symbol]
+        idx = min(self.current_index, len(df) - 1)
+        row = df.iloc[idx]
+        
+        prev_row = df.iloc[idx-1] if idx > 0 else row
+        change = row['Close'] - prev_row['Close']
+        change_percent = (change / prev_row['Close']) * 100 if prev_row['Close'] != 0 else 0
+        
+        return {
+            'c': row['Close'], 'h': row['High'], 'l': row['Low'],
+            'o': row['Open'], 'd': change, 'dp': change_percent
         }
 
-    def _make_request(self, endpoint: str, params: dict = None) -> Optional[dict]:
-        """API 요청 실행"""
-        cache_key = f"{endpoint}:{json.dumps(params or {}, sort_keys=True)}"
-
-        # 캐시 확인
-        cached_data = self._get_cached(cache_key)
-        if cached_data:
-            return cached_data
-
-        # 오프라인 모드면 시뮬레이션 데이터 반환
-        if self.offline_mode:
-            return self._generate_fallback_data(endpoint, params)
-
-        try:
-            # Rate limit 체크
-            self._wait_if_rate_limited()
-
-            # API 호출
-            params = params or {}
-            params['token'] = self.api_key
-            url = f"{self.base_url}/{endpoint}"
-
-            response = requests.get(url, params=params, timeout=10)
-
-            if response.status_code == 200:
-                data = response.json()
-                self._set_cache(cache_key, data)
-                return data
-            elif response.status_code == 401:
-                messagebox.showerror("API 키 오류",
-                    "Finnhub API 키가 잘못되었습니다.\n코드 상단의 FINNHUB_API_KEY를 확인하세요.")
-                return None
-            else:
-                print(f"⚠️ API 오류: {response.status_code}")
-                return self._generate_fallback_data(endpoint, params)
-
-        except requests.exceptions.RequestException as e:
-            print(f"⚠️ 네트워크 오류: {e}")
-            self.offline_mode = True
-            return self._generate_fallback_data(endpoint, params)
-
-    def _generate_fallback_data(self, endpoint: str, params: dict) -> dict:
-        """오프라인/오류 시 시뮬레이션 데이터 생성"""
-        if 'quote' in endpoint:
-            base_price = random.uniform(100, 500)
-            change = random.uniform(-5, 5)
-            return {
-                'c': base_price,  # current price
-                'h': base_price + random.uniform(0, 10),  # high
-                'l': base_price - random.uniform(0, 10),  # low
-                'o': base_price - change,  # open
-                'pc': base_price - change,  # previous close
-                'd': change,  # change
-                'dp': (change / base_price) * 100  # percent change
-            }
-        elif 'company-news' in endpoint or 'news' in endpoint:
-            return [
-                {
-                    'headline': f"시뮬레이션 뉴스: {params.get('symbol', 'MARKET')} 관련 소식",
-                    'summary': "오프라인 모드에서 생성된 시뮬레이션 뉴스입니다.",
-                    'source': 'Simulation',
-                    'datetime': int(time.time()),
-                    'sentiment': random.choice(['positive', 'negative', 'neutral'])
-                }
-                for _ in range(3)
-            ]
-        elif 'stock/profile2' in endpoint:
-            return {
-                'name': params.get('symbol', 'Unknown'),
-                'ticker': params.get('symbol', 'N/A'),
-                'marketCapitalization': random.uniform(100, 3000),
-                'finnhubIndustry': 'Technology'
-            }
-        elif 'stock/recommendation' in endpoint:
-            return [
-                {
-                    'buy': random.randint(5, 20),
-                    'hold': random.randint(5, 15),
-                    'sell': random.randint(0, 10),
-                    'strongBuy': random.randint(5, 15),
-                    'strongSell': random.randint(0, 5),
-                    'period': datetime.now().strftime('%Y-%m-%d')
-                }
-            ]
-        return {}
-
-    def get_quote(self, symbol: str) -> Optional[dict]:
-        """실시간 주가 조회"""
-        return self._make_request('quote', {'symbol': symbol})
-
-    def get_company_news(self, symbol: str, days_back: int = 7) -> List[dict]:
-        """기업 뉴스 조회"""
-        to_date = datetime.now().strftime('%Y-%m-%d')
-        from_date = (datetime.now() - timedelta(days=days_back)).strftime('%Y-%m-%d')
-        news = self._make_request('company-news', {
-            'symbol': symbol,
-            'from': from_date,
-            'to': to_date
-        })
-        return news[:10] if news else []  # 최대 10개
-
-    def get_market_news(self, category: str = 'general') -> List[dict]:
-        """시장 전체 뉴스 조회"""
-        news = self._make_request('news', {'category': category})
-        return news[:10] if news else []
-
-    def get_company_profile(self, symbol: str) -> Optional[dict]:
-        """기업 프로필 조회"""
-        return self._make_request('stock/profile2', {'symbol': symbol})
-
-    def get_recommendations(self, symbol: str) -> List[dict]:
-        """애널리스트 추천 조회"""
-        recs = self._make_request('stock/recommendation', {'symbol': symbol})
-        return recs if recs else []
-
-
-# ========== 4. Stock 클래스 ==========
-class Stock:
-    """주식 종목 클래스"""
-
-    def __init__(self, symbol: str, api: FinnhubAPI):
-        self.symbol = symbol
-        self.api = api
-        self.price_history = []  # [(timestamp, {'open': o, 'high': h, 'low': l, 'close': c}), ...]
-        self.current_price = 0.0
-        self.daily_change = 0.0
-        self.daily_change_percent = 0.0
-        self.company_name = symbol
-        self.market_cap = 0.0
-        self.industry = "Unknown"
-
-        # 초기 데이터 로드
-        self.update_price()
-        self.load_company_info()
-
-    def update_price(self):
-        """실시간 가격 업데이트"""
-        quote = self.api.get_quote(self.symbol)
-        if quote and 'c' in quote:
-            self.current_price = quote['c']
-            self.daily_change = quote.get('d', 0)
-            self.daily_change_percent = quote.get('dp', 0)
-
-            # 히스토리 저장 (최대 100개)
-            self.price_history.append((time.time(), self.current_price))
-            if len(self.price_history) > 100:
-                self.price_history.pop(0)
-
-    def load_company_info(self):
-        """기업 정보 로드"""
-        profile = self.api.get_company_profile(self.symbol)
-        if profile:
-            self.company_name = profile.get('name', self.symbol)
-            self.market_cap = profile.get('marketCapitalization', 0)
-            self.industry = profile.get('finnhubIndustry', 'Unknown')
-
-    def get_recommendation_text(self) -> str:
-        """애널리스트 추천 텍스트"""
-        recs = self.api.get_recommendations(self.symbol)
-        if recs:
-            latest = recs[0]
-            strong_buy = latest.get('strongBuy', 0)
-            buy = latest.get('buy', 0)
-            hold = latest.get('hold', 0)
-            sell = latest.get('sell', 0)
-
-            total = strong_buy + buy + hold + sell
-            if total == 0:
-                return "N/A"
-
-            if strong_buy + buy > sell * 2:
-                return "🟢 Strong Buy"
-            elif strong_buy + buy > sell:
-                return "🟢 Buy"
-            elif sell > buy * 2:
-                return "🔴 Sell"
-            else:
-                return "🟡 Hold"
-        return "N/A"
-
-    def get_52week_range(self) -> Tuple[float, float]:
-        """52주 최고/최저 (시뮬레이션)"""
-        if self.current_price:
-            low = self.current_price * random.uniform(0.7, 0.9)
-            high = self.current_price * random.uniform(1.1, 1.3)
-            return (low, high)
-        return (0, 0)
-
-
-# ========== 5. MarketNews 클래스 ==========
-class MarketNews:
-    """뉴스 관리 및 센티먼트 분석"""
-
-    def __init__(self, api: FinnhubAPI):
-        self.api = api
-        self.news_cache = {}  # {symbol: [news_items]}
-
-    def get_stock_news(self, symbol: str) -> List[dict]:
-        """종목별 뉴스 가져오기"""
-        news = self.api.get_company_news(symbol)
-        enhanced_news = []
-
-        for item in news:
-            # 센티먼트 분석 (간단한 키워드 기반)
-            sentiment = self._analyze_sentiment(item.get('headline', '') + ' ' + item.get('summary', ''))
-            enhanced_news.append({
-                'headline': item.get('headline', 'No headline'),
-                'summary': item.get('summary', ''),
-                'source': item.get('source', 'Unknown'),
-                'datetime': item.get('datetime', int(time.time())),
-                'sentiment': sentiment,
-                'url': item.get('url', '')
-            })
-
-        self.news_cache[symbol] = enhanced_news
-        return enhanced_news
-
-    def get_market_sentiment(self) -> str:
-        """전체 시장 분위기"""
-        market_news = self.api.get_market_news()
-        if not market_news:
-            return "중립"
-
-        sentiments = [self._analyze_sentiment(n.get('headline', '') + ' ' + n.get('summary', ''))
-                     for n in market_news]
-
-        positive = sentiments.count('positive')
-        negative = sentiments.count('negative')
-
-        if positive > negative * 1.5:
-            return "🟢 강세"
-        elif negative > positive * 1.5:
-            return "🔴 약세"
-        else:
-            return "🟡 중립"
-
-    def _analyze_sentiment(self, text: str) -> str:
-        """간단한 센티먼트 분석"""
-        text = text.lower()
-
-        positive_words = ['surge', 'gain', 'rise', 'up', 'growth', 'profit', 'beat',
-                         'success', 'bullish', 'positive', 'strong', 'high', 'record']
-        negative_words = ['fall', 'drop', 'decline', 'loss', 'miss', 'concern',
-                         'bearish', 'negative', 'weak', 'low', 'crash', 'sell-off']
-
-        pos_count = sum(1 for word in positive_words if word in text)
-        neg_count = sum(1 for word in negative_words if word in text)
-
-        if pos_count > neg_count:
-            return 'positive'
-        elif neg_count > pos_count:
-            return 'negative'
-        else:
-            return 'neutral'
-
-    def calculate_news_impact(self, symbol: str) -> float:
-        """뉴스가 주가에 미치는 영향 계산 (-5% ~ +5%)"""
-        news = self.news_cache.get(symbol, [])
-        if not news:
-            return 0.0
-
-        recent_news = news[:5]  # 최근 5개
-        sentiments = [n['sentiment'] for n in recent_news]
-
-        impact = 0.0
-        for s in sentiments:
-            if s == 'positive':
-                impact += random.uniform(0.5, 1.5)
-            elif s == 'negative':
-                impact += random.uniform(-1.5, -0.5)
-
-        return max(-5.0, min(5.0, impact))  # -5% ~ +5% 제한
-
-
-# ========== 6. Player 클래스 ==========
-class Player:
-    """플레이어 클래스 - 포트폴리오 관리"""
-
-    def __init__(self, initial_cash: float = INITIAL_CASH):
-        self.cash = initial_cash
-        self.initial_cash = initial_cash
-        self.portfolio = {}  # {symbol: {'shares': int, 'avg_price': float}}
-        self.trade_history = []  # [{timestamp, type, symbol, shares, price}, ...]
-
-    def buy_stock(self, symbol: str, shares: int, price: float) -> bool:
-        """주식 매수"""
-        total_cost = shares * price
-
-        if total_cost > self.cash:
-            return False
-
-        self.cash -= total_cost
-
-        if symbol in self.portfolio:
-            # 평균 단가 재계산
-            old_shares = self.portfolio[symbol]['shares']
-            old_avg = self.portfolio[symbol]['avg_price']
-            new_shares = old_shares + shares
-            new_avg = (old_shares * old_avg + shares * price) / new_shares
-
-            self.portfolio[symbol] = {'shares': new_shares, 'avg_price': new_avg}
-        else:
-            self.portfolio[symbol] = {'shares': shares, 'avg_price': price}
-
-        # 거래 히스토리 저장
-        self.trade_history.append({
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'type': '매수',
-            'symbol': symbol,
-            'shares': shares,
-            'price': price
-        })
-
-        return True
-
-    def sell_stock(self, symbol: str, shares: int, price: float) -> bool:
-        """주식 매도"""
-        if symbol not in self.portfolio or self.portfolio[symbol]['shares'] < shares:
-            return False
-
-        total_revenue = shares * price
-        self.cash += total_revenue
-
-        self.portfolio[symbol]['shares'] -= shares
-
-        if self.portfolio[symbol]['shares'] == 0:
-            del self.portfolio[symbol]
-
-        # 거래 히스토리 저장
-        self.trade_history.append({
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
-            'type': '매도',
-            'symbol': symbol,
-            'shares': shares,
-            'price': price
-        })
-
-        return True
-
-    def get_total_assets(self, stocks: Dict[str, Stock]) -> float:
-        """총 자산 계산"""
-        stock_value = sum(
-            stocks[symbol].current_price * data['shares']
-            for symbol, data in self.portfolio.items()
-            if symbol in stocks
-        )
-        return self.cash + stock_value
-
-    def get_profit_loss(self, stocks: Dict[str, Stock]) -> Tuple[float, float]:
-        """수익금 및 수익률 계산"""
-        total_assets = self.get_total_assets(stocks)
-        profit = total_assets - self.initial_cash
-        profit_percent = (profit / self.initial_cash) * 100
-        return profit, profit_percent
-
-    def get_portfolio_summary(self, stocks: Dict[str, Stock]) -> List[dict]:
-        """포트폴리오 요약"""
-        summary = []
-        for symbol, data in self.portfolio.items():
-            if symbol in stocks:
-                current_price = stocks[symbol].current_price
-                shares = data['shares']
-                avg_price = data['avg_price']
-                current_value = current_price * shares
-                cost = avg_price * shares
-                profit = current_value - cost
-                profit_percent = (profit / cost * 100) if cost > 0 else 0
-
-                summary.append({
-                    'symbol': symbol,
-                    'shares': shares,
-                    'avg_price': avg_price,
-                    'current_price': current_price,
-                    'profit': profit,
-                    'profit_percent': profit_percent
-                })
-
-        return summary
-
-
-# ========== 7. GameEngine 클래스 ==========
-class GameEngine:
-    """게임 엔진 - 일별 진행 시스템"""
-
-    def __init__(self, api: FinnhubAPI):
-        self.api = api
-        self.stocks = {}
-        self.player = Player()
-        self.market_news = MarketNews(api)
-        self.current_time = GAME_START_DATE  # 게임 내 현재 시간
-        self.tick_count = 0  # 진행된 틱 수
-        self.leaderboard = []  # [(name, profit_percent), ...]
-
-        # 초기 주식 로드
-        for symbol in POPULAR_STOCKS:
-            stock = Stock(symbol, api)
-            # 초기 가격 히스토리에 게임 시작 시간 저장 (OHLC 형태)
-            initial_ohlc = {
-                'open': stock.current_price,
-                'high': stock.current_price,
-                'low': stock.current_price,
-                'close': stock.current_price
-            }
-            stock.price_history = [(self.current_time, initial_ohlc)]
-            self.stocks[symbol] = stock
-
-    def next_tick(self):
-        """다음 시간대로 진행 (3시간 후)"""
-        self.tick_count += 1
-        self.current_time += timedelta(hours=HOURS_PER_TICK)
-
-        # 시장 마감 시간 이후면 다음 날 개장 시간으로
-        if self.current_time.hour >= MARKET_CLOSE_HOUR:
-            # 다음 날 개장 시간으로 설정
-            next_day = self.current_time.date() + timedelta(days=1)
-            self.current_time = datetime.combine(next_day, datetime.min.time()) + timedelta(hours=MARKET_OPEN_HOUR)
-
-        # 모든 주식 가격 업데이트 (시뮬레이션)
-        for stock in self.stocks.values():
-            # 이전 종가를 시가로 사용
-            open_price = stock.current_price
-
-            # 랜덤 가격 변동 (-8% ~ +8%) - 변동성 증가
-            change_percent = random.uniform(-8, 8)
-            close_price = open_price * (1 + change_percent / 100)
-
-            # 고가/저가 생성 (시가와 종가 사이에서 변동) - 변동폭 증가
-            high_price = max(open_price, close_price) * random.uniform(1.0, 1.05)
-            low_price = min(open_price, close_price) * random.uniform(0.95, 1.0)
-
-            # 현재가 업데이트
-            stock.current_price = close_price
-            stock.daily_change = close_price - open_price
-            stock.daily_change_percent = change_percent
-
-            # OHLC 데이터 생성
-            ohlc_data = {
-                'open': open_price,
-                'high': high_price,
-                'low': low_price,
-                'close': close_price
-            }
-
-            # 히스토리 저장 (게임 시간 사용)
-            stock.price_history.append((self.current_time, ohlc_data))
-            if len(stock.price_history) > 100:
-                stock.price_history.pop(0)
-
-            # 뉴스 임팩트 추가 적용 (30% 확률로 증가)
-            if random.random() < 0.3:
-                impact = self.market_news.calculate_news_impact(stock.symbol)
-                stock.current_price *= (1 + impact / 100)
-
-        # 랜덤 이벤트 (10% 확률로 증가)
-        if random.random() < 0.1:
-            self._trigger_random_event()
-
-        # 게임 오버 체크 (자산이 초기 자금의 30% 이하)
-        return self.check_game_over()
-
-    def _trigger_random_event(self):
-        """랜덤 이벤트 발생"""
-        events = [
-            "📈 시장 급등! 모든 주식 +5%",
-            "📉 시장 급락! 모든 주식 -5%",
-            "💡 기술주 강세! 기술주 +8%",
-            "⚡ 실적 발표 시즌! 일부 주식 변동성 증가",
-            "🚨 경제 위기! 모든 주식 -7%",
-            "🎉 호재 발표! 모든 주식 +7%"
-        ]
-
-        event = random.choice(events)
-        print(f"🎲 이벤트 발생: {event}")
-
-        # 이벤트 효과 적용
-        if "급등" in event:
-            for stock in self.stocks.values():
-                stock.current_price *= 1.05
-        elif "급락" in event:
-            for stock in self.stocks.values():
-                stock.current_price *= 0.95
-        elif "경제 위기" in event:
-            for stock in self.stocks.values():
-                stock.current_price *= 0.93
-        elif "호재" in event:
-            for stock in self.stocks.values():
-                stock.current_price *= 1.07
-
-    def check_game_over(self) -> bool:
-        """게임 오버 체크 - 자산이 초기 자금의 30% 이하면 게임 종료"""
-        total_assets = self.player.get_total_assets(self.stocks)
-        threshold = self.player.initial_cash * 0.3
-
-        if total_assets <= threshold:
+    def next_day(self):
+        if self.dates and self.current_index < len(self.dates) - 1:
+            self.current_index += 1
             return True
         return False
 
-    def save_game(self, filename: str = "savegame.json"):
-        """게임 저장"""
-        save_data = {
-            'player': {
-                'cash': self.player.cash,
-                'initial_cash': self.player.initial_cash,
-                'portfolio': self.player.portfolio,
-                'trade_history': self.player.trade_history
-            },
-            'current_time': self.current_time.isoformat(),
-            'tick_count': self.tick_count,
-            'leaderboard': self.leaderboard
+# ========== 3. 뉴스 생성기 클래스 ==========
+class NewsGenerator:
+    def __init__(self):
+        self.good_news = ["실적 서프라이즈", "신제품 기대감", "대규모 계약 체결", "목표 주가 상향", "점유율 1위 달성"]
+        self.bad_news = ["원자재 가격 상승", "경쟁 심화 우려", "규제 조사 착수", "실적 전망 하회", "차익 실현 매물"]
+        self.neutral_news = ["보합세 유지", "특별한 이슈 부재", "관망세 짙어", "기관 매수세 유입"]
+
+    def generate_news(self, symbol, change_percent):
+        if change_percent >= 3.0:
+            sentiment, head = "positive", f"[{symbol}] 급등! {random.choice(self.good_news)}"
+        elif change_percent <= -3.0:
+            sentiment, head = "negative", f"[{symbol}] 급락... {random.choice(self.bad_news)}"
+        elif change_percent > 0:
+            sentiment, head = "positive", f"[{symbol}] 소폭 상승, {random.choice(self.good_news)}"
+        elif change_percent < 0:
+            sentiment, head = "negative", f"[{symbol}] 소폭 하락, {random.choice(self.bad_news)}"
+        else:
+            sentiment, head = "neutral", f"[{symbol}] {random.choice(self.neutral_news)}"
+
+        return {
+            'headline': head,
+            'summary': f"전일 대비 {change_percent:.2f}% 변동을 보였습니다.",
+            'source': 'AI Market Watch',
+            'datetime': "", 
+            'sentiment': sentiment
         }
 
-        with open(filename, 'w') as f:
-            json.dump(save_data, f, indent=2)
+# ========== 4. Stock 클래스 (중복 제거 및 수정됨) ==========
+class Stock:
+    def __init__(self, symbol: str, data_manager):
+        self.symbol = symbol
+        self.data_manager = data_manager
+        self.price_history = [] 
+        self.current_price = 0.0
+        self.daily_change = 0.0
+        self.daily_change_percent = 0.0
+        self.update_price() # 초기 가격 설정
 
-        print(f"💾 게임이 저장되었습니다: {filename}")
+    def update_price(self, market_bias=0.0):
+        """
+        Updates the stock price using the 'Parallel Universe' logic.
+        New Price = Old Price * (1 + (Real_Change + Market_Bias + Random_Noise) / 100)
+        """
+        quote = self.data_manager.get_price_data(self.symbol)
+        if quote:
+            # 1. Get Real Historical Change (%)
+            real_change_percent = quote['dp']
+            
+            # 2. Generate Idiosyncratic Risk (Random Noise)
+            # Gaussian distribution: mean=0, sigma=1.5 (approx +/- 4.5% max deviation usually)
+            random_noise = random.gauss(mu=0, sigma=1.5)
+            
+            # 3. Calculate Total Percent Change
+            total_change_percent = real_change_percent + market_bias + random_noise
+            
+            # 4. Calculate New Price (Cumulative Divergence)
+            # If it's the first update, we might want to sync with real price, 
+            # but for "Parallel Universe", we start diverging immediately or from the previous simulated price.
+            # Here, we assume self.current_price is already set (initially from real data).
+            prev_price = self.current_price if self.current_price > 0 else quote['c']
+            
+            new_price = prev_price * (1 + total_change_percent / 100.0)
+            
+            # Ensure price doesn't go negative
+            self.current_price = max(0.01, new_price)
+            
+            # Update change metrics
+            self.daily_change = self.current_price - prev_price
+            self.daily_change_percent = total_change_percent
+            
+            current_date_str = self.data_manager.get_current_date()
+            # 날짜 객체로 변환하여 저장
+            dt_obj = datetime.strptime(current_date_str, "%Y-%m-%d")
+            
+            self.price_history.append((dt_obj, {
+                'open': quote['o'], 'high': quote['h'], 'low': quote['l'], 'close': self.current_price # Use simulated close
+            }))
+            if len(self.price_history) > 365:
+                self.price_history.pop(0)
 
-    def load_game(self, filename: str = "savegame.json"):
-        """게임 불러오기"""
-        if not os.path.exists(filename):
-            print("⚠️ 저장 파일이 없습니다.")
+    def get_recommendation_text(self) -> str:
+        if self.daily_change_percent > 5.0: return "🔴 Strong Sell"
+        elif self.daily_change_percent > 2.0: return "🔴 Sell"
+        elif self.daily_change_percent < -5.0: return "🟢 Strong Buy"
+        elif self.daily_change_percent < -2.0: return "🟢 Buy"
+        else: return "🟡 Hold"
+
+# ========== 5. MarketNews 클래스 (수정됨) ==========
+class MarketNews:
+    def __init__(self, generator):
+        self.generator = generator
+        self.news_cache = {}  # 종목별 뉴스
+        self.news_log = []    # 전체 뉴스 로그 (GUI 표시용)
+
+    def add_news(self, symbol: str, news_item: dict):
+        if symbol not in self.news_cache:
+            self.news_cache[symbol] = []
+        
+        # 종목별 캐시에 추가
+        self.news_cache[symbol].insert(0, news_item)
+        if len(self.news_cache[symbol]) > 20: self.news_cache[symbol].pop()
+
+        # 전체 로그에 추가
+        self.news_log.append(news_item)
+        if len(self.news_log) > 50: self.news_log.pop(0)
+
+    def get_stock_news(self, symbol: str) -> List[dict]:
+        return self.news_cache.get(symbol, [])
+
+    def get_market_sentiment(self) -> str:
+        val = random.random()
+        if val > 0.7: return "🟢 강세 (Bullish)"
+        elif val < 0.3: return "🔴 약세 (Bearish)"
+        else: return "🟡 중립 (Neutral)"
+
+# ========== 6. Player 클래스 ==========
+class Player:
+    def __init__(self, initial_cash: float = INITIAL_CASH):
+        self.cash = initial_cash
+        self.initial_cash = initial_cash
+        self.portfolio = {}
+        self.trade_history = []
+
+    def buy_stock(self, symbol: str, shares: int, price: float) -> bool:
+        total_cost = shares * price
+        if total_cost > self.cash: return False
+        self.cash -= total_cost
+
+        if symbol in self.portfolio:
+            old_s = self.portfolio[symbol]['shares']
+            old_p = self.portfolio[symbol]['avg_price']
+            new_s = old_s + shares
+            new_p = (old_s * old_p + shares * price) / new_s
+            self.portfolio[symbol] = {'shares': new_s, 'avg_price': new_p}
+        else:
+            self.portfolio[symbol] = {'shares': shares, 'avg_price': price}
+
+        self.trade_history.append({
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M'),
+            'type': '매수', 'symbol': symbol, 'shares': shares, 'price': price
+        })
+        return True
+
+    def sell_stock(self, symbol: str, shares: int, price: float) -> bool:
+        if symbol not in self.portfolio or self.portfolio[symbol]['shares'] < shares:
             return False
+        total_revenue = shares * price
+        self.cash += total_revenue
+        self.portfolio[symbol]['shares'] -= shares
+        if self.portfolio[symbol]['shares'] == 0: del self.portfolio[symbol]
 
-        try:
-            with open(filename, 'r') as f:
-                save_data = json.load(f)
+        self.trade_history.append({
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M'),
+            'type': '매도', 'symbol': symbol, 'shares': shares, 'price': price
+        })
+        return True
 
-            self.player.cash = save_data['player']['cash']
-            self.player.initial_cash = save_data['player']['initial_cash']
-            self.player.portfolio = save_data['player']['portfolio']
-            self.player.trade_history = save_data['player']['trade_history']
-            self.current_time = datetime.fromisoformat(save_data['current_time'])
-            self.tick_count = save_data['tick_count']
-            self.leaderboard = save_data.get('leaderboard', [])
+    def get_total_assets(self, stocks: Dict[str, Stock]) -> float:
+        val = sum(stocks[sym].current_price * d['shares'] for sym, d in self.portfolio.items() if sym in stocks)
+        return self.cash + val
 
-            print(f"📂 게임을 불러왔습니다: {filename}")
-            return True
-        except Exception as e:
-            print(f"❌ 불러오기 실패: {e}")
-            return False
+    def get_profit_loss(self, stocks: Dict[str, Stock]) -> Tuple[float, float]:
+        total = self.get_total_assets(stocks)
+        profit = total - self.initial_cash
+        pct = (profit / self.initial_cash) * 100
+        return profit, pct
 
+    def get_portfolio_summary(self, stocks: Dict[str, Stock]) -> List[dict]:
+        summary = []
+        for sym, data in self.portfolio.items():
+            if sym in stocks:
+                curr = stocks[sym].current_price
+                cost = data['avg_price'] * data['shares']
+                curr_val = curr * data['shares']
+                prof = curr_val - cost
+                prof_pct = (prof/cost*100) if cost>0 else 0
+                summary.append({
+                    'symbol': sym, 'shares': data['shares'], 'avg_price': data['avg_price'],
+                    'current_price': curr, 'profit': prof, 'profit_percent': prof_pct
+                })
+        return summary
 
-# ========== 8. StockTradingGUI 클래스 ==========
+# ========== 7. GameEngine 클래스  ==========
+class GameEngine:
+    def __init__(self):
+        self.symbols = POPULAR_STOCKS
+        self.data_manager = HistoricalDataManager(self.symbols)
+        self.news_generator = NewsGenerator()
+        self.market_news = MarketNews(self.news_generator)
+        self.stocks = {}
+        self.player = Player()
+        self.tick_count = 0 
+        
+        # 주식 객체 생성
+        for symbol in self.symbols:
+            self.stocks[symbol] = Stock(symbol, self.data_manager)
+
+    def next_turn(self, days=1):
+        """다음 턴(하루 또는 여러 날) 진행"""
+        for _ in range(days):
+            self.tick_count += 1
+            has_next = self.data_manager.next_day()
+            
+            if not has_next:
+                return False, True # Game Over(X), Data End(O)
+
+            current_date_str = self.data_manager.get_current_date()
+            
+            # --- Calculate Market Bias (Systemic Risk) ---
+            market_bias = self._calculate_market_bias()
+
+            for symbol, stock in self.stocks.items():
+                # Pass market bias to stock update
+                stock.update_price(market_bias)
+                
+                # 뉴스 생성 (3% 이상 변동 시)
+                if abs(stock.daily_change_percent) > 3.0:
+                    news_item = self.news_generator.generate_news(symbol, stock.daily_change_percent)
+                    news_item['datetime'] = current_date_str
+                    self.market_news.add_news(symbol, news_item)
+
+            # 랜덤 이벤트 (Market Bias가 매우 클 때 추가 뉴스 생성 가능)
+            if market_bias < -5.0:
+                self.market_news.add_news("MARKET", {
+                    'headline': "📉 Market Crash! Panic Selling!", 
+                    'summary': 'The market is taking a heavy hit.',
+                    'source': 'Global News', 'datetime': current_date_str, 'sentiment': 'negative'
+                })
+            elif market_bias > 5.0:
+                self.market_news.add_news("MARKET", {
+                    'headline': "📈 Bull Run! Market is Booming!", 
+                    'summary': 'Investors are optimistic.',
+                    'source': 'Global News', 'datetime': current_date_str, 'sentiment': 'positive'
+                })
+
+            if self.check_game_over():
+                return True, False
+        
+        return False, False
+
+    def _calculate_market_bias(self) -> float:
+        """
+        Determines the daily market sentiment (Systemic Risk).
+        Returns a percentage bias (e.g., -10.0 for -10%).
+        """
+        rand_val = random.random()
+        
+        # 1. Crash (Black Swan): 2% probability
+        if rand_val < 0.02:
+            # Bias: -10% to -15%
+            return random.uniform(-15.0, -10.0)
+        
+        # 2. Bear Market: 15% probability (0.02 to 0.17)
+        elif rand_val < 0.17:
+            # Bias: -2% to -5%
+            return random.uniform(-5.0, -2.0)
+            
+        # 3. Bull Market: 15% probability (0.17 to 0.32)
+        elif rand_val < 0.32:
+            # Bias: +3% to +8%
+            return random.uniform(3.0, 8.0)
+            
+        # 4. Normal Market: 68% probability
+        else:
+            # Bias: -1% to +1% (Slight variance)
+            return random.uniform(-1.0, 1.0)
+
+    def _trigger_random_event(self, date_str):
+        events = [("📈 금리 동결 시사!", "positive"), ("📉 물가지수 쇼크!", "negative")]
+        headline, sentiment = random.choice(events)
+        self.market_news.add_news("MARKET", {
+            'headline': headline, 'summary': '거시경제 뉴스 발생',
+            'source': 'Global News', 'datetime': date_str, 'sentiment': sentiment
+        })
+
+    def check_game_over(self) -> bool:
+        total = self.player.get_total_assets(self.stocks)
+        return total <= self.player.initial_cash * 0.3
+
+    def save_game(self): pass 
+    def load_game(self): return False
+
+# ========== 8. StockTradingGUI 클래스 (UI Redesign) ==========
+def get_default_font_name():
+    system = platform.system()
+    if system == "Windows": return "Malgun Gothic"
+    elif system == "Darwin": return "AppleGothic"
+    return "NanumGothic"
+
 class StockTradingGUI:
-    """tkinter GUI 클래스"""
+    # --- Color Palette (Toss Securities Style Dark Mode) ---
+    COLOR_BG = "#191919"        # Deep Dark Background
+    COLOR_CARD = "#2C2C2C"      # Card Background
+    COLOR_TEXT = "#FFFFFF"      # Primary Text
+    COLOR_TEXT_SUB = "#B0B0B0"  # Secondary Text
+    COLOR_ACCENT_UP = "#FF4B4B" # Red (Rise)
+    COLOR_ACCENT_DOWN = "#4B89DC"# Blue (Fall)
+    COLOR_PRIMARY = "#3182F6"   # Toss Blue
+    COLOR_BORDER = "#333333"    # Subtle Border
 
     def __init__(self, root: tk.Tk, game_engine: GameEngine):
         self.root = root
         self.game = game_engine
-        self.root.title("📈 실시간 주식 투자 시뮬레이션 (Finnhub)")
+        self.root.title("Stock Simulator")
         self.root.geometry("1400x900")
+        self.root.configure(bg=self.COLOR_BG)
 
-        # 자동 업데이트 스레드
-        self.running = True
-        self.update_thread = None
-
+        self.font_name = get_default_font_name()
+        self.setup_styles()
         self.setup_ui()
-        self.start_auto_update()
+
+    def setup_styles(self):
+        style = ttk.Style()
+        style.theme_use('default')
+
+        # Configure Colors & Fonts
+        style.configure(".", 
+                        background=self.COLOR_BG, 
+                        foreground=self.COLOR_TEXT, 
+                        font=(self.font_name, 10))
+        
+        style.configure("TFrame", background=self.COLOR_BG)
+        
+        # Card Style (for panels)
+        style.configure("Card.TFrame", background=self.COLOR_CARD, relief="flat")
+        
+        # Label Styles
+        style.configure("TLabel", background=self.COLOR_BG, foreground=self.COLOR_TEXT)
+        style.configure("Card.TLabel", background=self.COLOR_CARD, foreground=self.COLOR_TEXT)
+        style.configure("Header.TLabel", font=(self.font_name, 20, "bold"), background=self.COLOR_BG, foreground=self.COLOR_TEXT)
+        style.configure("SubHeader.TLabel", font=(self.font_name, 14, "bold"), background=self.COLOR_CARD, foreground=self.COLOR_TEXT)
+        style.configure("Value.TLabel", font=(self.font_name, 12), background=self.COLOR_CARD, foreground=self.COLOR_TEXT)
+
+        # Button Styles
+        style.configure("TButton", 
+                        font=(self.font_name, 10, "bold"), 
+                        background=self.COLOR_PRIMARY, 
+                        foreground="white", 
+                        borderwidth=0, 
+                        focuscolor=self.COLOR_PRIMARY)
+        style.map("TButton", 
+                  background=[('active', '#2565C0')], 
+                  foreground=[('active', 'white')])
+        
+        style.configure("Buy.TButton", background=self.COLOR_ACCENT_UP)
+        style.map("Buy.TButton", background=[('active', '#D32F2F')])
+        
+        style.configure("Sell.TButton", background=self.COLOR_ACCENT_DOWN)
+        style.map("Sell.TButton", background=[('active', '#1976D2')])
+
+        # Treeview (List) Style
+        style.configure("Treeview", 
+                        background=self.COLOR_BG, 
+                        foreground=self.COLOR_TEXT, 
+                        fieldbackground=self.COLOR_BG, 
+                        rowheight=30,
+                        borderwidth=0)
+        style.configure("Treeview.Heading", 
+                        background=self.COLOR_CARD, 
+                        foreground=self.COLOR_TEXT, 
+                        font=(self.font_name, 10, "bold"),
+                        borderwidth=0)
+        style.map("Treeview", background=[('selected', self.COLOR_CARD)], foreground=[('selected', self.COLOR_TEXT)])
 
     def setup_ui(self):
-        """UI 구성"""
-        # 메인 컨테이너
+        # Main Layout
         main_container = ttk.Frame(self.root)
-        main_container.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        main_container.pack(fill=tk.BOTH, expand=True, padx=20, pady=20)
 
-        # ===== 상단: 대시보드 =====
-        dashboard_frame = ttk.LabelFrame(main_container, text="📊 대시보드", padding=10)
-        dashboard_frame.pack(fill=tk.X, pady=(0, 10))
+        # --- 1. Header (Dashboard) ---
+        header_frame = ttk.Frame(main_container)
+        header_frame.pack(fill=tk.X, pady=(0, 20))
 
+        # App Title
+        ttk.Label(header_frame, text="Stock Simulator", style="Header.TLabel").pack(side=tk.LEFT)
+        
+        # Dashboard Info
         self.dashboard_labels = {}
-        dashboard_info = [
-            ("총 자산", "total_assets"),
-            ("현금", "cash"),
-            ("투자금액", "invested"),
-            ("수익금", "profit"),
-            ("수익률", "profit_percent"),
-            ("게임 시간", "game_time"),
-            ("시장 분위기", "market_sentiment")
-        ]
+        info_container = ttk.Frame(header_frame)
+        info_container.pack(side=tk.RIGHT)
 
-        for i, (label, key) in enumerate(dashboard_info):
-            ttk.Label(dashboard_frame, text=f"{label}:").grid(row=0, column=i*2, padx=5, sticky=tk.W)
-            value_label = ttk.Label(dashboard_frame, text="$0", font=('Arial', 10, 'bold'))
-            value_label.grid(row=0, column=i*2+1, padx=5, sticky=tk.W)
-            self.dashboard_labels[key] = value_label
+        for key, label in [("game_time", "Date"), ("cash", "Cash"), ("total_assets", "Total Assets"), ("profit_percent", "Return")]:
+            frame = ttk.Frame(info_container, padding=(15, 0))
+            frame.pack(side=tk.LEFT)
+            ttk.Label(frame, text=label, foreground=self.COLOR_TEXT_SUB, font=(self.font_name, 9)).pack(anchor="e")
+            lbl = ttk.Label(frame, text="-", font=(self.font_name, 12, "bold"))
+            lbl.pack(anchor="e")
+            self.dashboard_labels[key] = lbl
 
-        # ===== 중앙 컨테이너 =====
-        center_container = ttk.Frame(main_container)
-        center_container.pack(fill=tk.BOTH, expand=True)
+        # --- 2. Content Area ---
+        content_frame = ttk.Frame(main_container)
+        content_frame.pack(fill=tk.BOTH, expand=True)
 
-        # 왼쪽: 주식 시세 + 거래
-        left_frame = ttk.Frame(center_container)
-        left_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 5))
+        # Left Panel (Market & Portfolio)
+        left_panel = ttk.Frame(content_frame, width=400)
+        left_panel.pack(side=tk.LEFT, fill=tk.BOTH, padx=(0, 20))
+        
+        # Right Panel (Chart, Trade, News)
+        right_panel = ttk.Frame(content_frame)
+        right_panel.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
 
-        # 주식 시세 패널
-        stock_frame = ttk.LabelFrame(left_frame, text="💹 실시간 주가", padding=10)
-        stock_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-
-        # 주식 목록 테이블
-        columns = ("종목", "현재가", "변동", "변동률", "추천")
-        self.stock_tree = ttk.Treeview(stock_frame, columns=columns, show='headings', height=8)
-
-        for col in columns:
+        # --- Left Panel Content ---
+        # Stock List
+        stock_card = self._create_card(left_panel, "Market")
+        stock_card.pack(fill=tk.BOTH, expand=True, pady=(0, 20))
+        
+        cols = ("Symbol", "Price", "Chg%", "Rec")
+        self.stock_tree = ttk.Treeview(stock_card, columns=cols, show='headings', height=10)
+        for col in cols: 
             self.stock_tree.heading(col, text=col)
-            self.stock_tree.column(col, width=100)
-
-        self.stock_tree.pack(fill=tk.BOTH, expand=True)
-
-        # 주식 목록 클릭 시 자동 선택
+            self.stock_tree.column(col, width=70 if col != "Rec" else 100, anchor="e" if col != "Symbol" else "w")
+        self.stock_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
         self.stock_tree.bind('<<TreeviewSelect>>', self.on_stock_select)
 
-        # 거래 패널
-        trade_frame = ttk.LabelFrame(left_frame, text="💰 거래", padding=10)
-        trade_frame.pack(fill=tk.X)
+        # Portfolio
+        port_card = self._create_card(left_panel, "My Portfolio")
+        port_card.pack(fill=tk.BOTH, expand=True)
+        
+        p_cols = ("Symbol", "Shares", "Avg", "Rtn%")
+        self.port_tree = ttk.Treeview(port_card, columns=p_cols, show='headings', height=8)
+        for col in p_cols: 
+            self.port_tree.heading(col, text=col)
+            self.port_tree.column(col, width=70, anchor="e" if col != "Symbol" else "w")
+        self.port_tree.pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
+        self.port_tree.bind('<<TreeviewSelect>>', self.on_port_select)
 
-        ttk.Label(trade_frame, text="종목:").grid(row=0, column=0, padx=5, pady=5, sticky=tk.W)
-        self.symbol_var = tk.StringVar(value=POPULAR_STOCKS[0])
-        symbol_combo = ttk.Combobox(trade_frame, textvariable=self.symbol_var,
-                                     values=POPULAR_STOCKS, state='readonly', width=10)
-        symbol_combo.grid(row=0, column=1, padx=5, pady=5)
-
-        ttk.Label(trade_frame, text="수량:").grid(row=0, column=2, padx=5, pady=5, sticky=tk.W)
-        self.shares_var = tk.StringVar(value="1")
-        shares_entry = ttk.Entry(trade_frame, textvariable=self.shares_var, width=10)
-        shares_entry.grid(row=0, column=3, padx=5, pady=5)
-
-        self.trade_info_label = ttk.Label(trade_frame, text="예상 금액: $0", foreground="blue")
-        self.trade_info_label.grid(row=0, column=4, padx=10, pady=5)
-
-        ttk.Button(trade_frame, text="🟢 매수", command=self.buy_stock).grid(row=0, column=5, padx=5, pady=5)
-        ttk.Button(trade_frame, text="🔴 매도", command=self.sell_stock).grid(row=0, column=6, padx=5, pady=5)
-        ttk.Button(trade_frame, text="⏩ 3시간 후", command=self.next_tick).grid(row=0, column=7, padx=5, pady=5)
-
-        # 수량 변경 시 예상 금액 업데이트
-        self.shares_var.trace_add('write', lambda *args: self.update_trade_info())
-        self.symbol_var.trace_add('write', lambda *args: (self.update_trade_info(), self.update_chart(self.symbol_var.get())))
-
-        # 포트폴리오 패널
-        portfolio_frame = ttk.LabelFrame(left_frame, text="🎯 내 포트폴리오", padding=10)
-        portfolio_frame.pack(fill=tk.BOTH, expand=True, pady=(10, 0))
-
-        port_columns = ("종목", "수량", "평균단가", "현재가", "손익", "손익률")
-        self.portfolio_tree = ttk.Treeview(portfolio_frame, columns=port_columns, show='headings', height=6)
-
-        for col in port_columns:
-            self.portfolio_tree.heading(col, text=col)
-            self.portfolio_tree.column(col, width=90)
-
-        self.portfolio_tree.pack(fill=tk.BOTH, expand=True)
-
-        # 오른쪽: 그래프 + 뉴스 + 히스토리
-        right_frame = ttk.Frame(center_container)
-        right_frame.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True, padx=(5, 0))
-
-        # 가격 차트
-        chart_frame = ttk.LabelFrame(right_frame, text="📈 주가 차트", padding=10)
-        chart_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
-
-        # matplotlib 그래프 설정
-        self.fig = Figure(figsize=(6, 3), dpi=80)
+        # --- Right Panel Content ---
+        # Chart Area
+        chart_card = self._create_card(right_panel, "Price Chart")
+        chart_card.pack(fill=tk.BOTH, expand=True, pady=(0, 20))
+        
+        self.fig = Figure(figsize=(5, 3), dpi=100, facecolor=self.COLOR_CARD)
         self.ax = self.fig.add_subplot(111)
-        self.canvas = FigureCanvasTkAgg(self.fig, master=chart_frame)
-        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True)
+        self.ax.set_facecolor(self.COLOR_CARD)
+        self.canvas = FigureCanvasTkAgg(self.fig, master=chart_card)
+        self.canvas.get_tk_widget().pack(fill=tk.BOTH, expand=True, padx=10, pady=10)
 
-        # 뉴스 피드
-        news_frame = ttk.LabelFrame(right_frame, text="📰 실시간 뉴스", padding=10)
-        news_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 10))
+        # Bottom Section (Trade & News)
+        bottom_frame = ttk.Frame(right_panel)
+        bottom_frame.pack(fill=tk.X, ipady=10)
 
-        self.news_text = scrolledtext.ScrolledText(news_frame, wrap=tk.WORD, height=8,
-                                                     font=('Arial', 9))
-        self.news_text.pack(fill=tk.BOTH, expand=True)
+        # Trade Panel
+        trade_card = self._create_card(bottom_frame, "Order")
+        trade_card.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=(0, 20))
+        
+        trade_inner = ttk.Frame(trade_card, style="Card.TFrame", padding=15)
+        trade_inner.pack(fill=tk.BOTH, expand=True)
 
-        # 뉴스 새로고침 버튼
-        ttk.Button(news_frame, text="🔄 뉴스 새로고침",
-                  command=self.refresh_news).pack(pady=(5, 0))
+        self.symbol_var = tk.StringVar()
+        self.shares_var = tk.StringVar(value="1")
 
-        # 거래 히스토리
-        history_frame = ttk.LabelFrame(right_frame, text="📜 거래 히스토리", padding=10)
-        history_frame.pack(fill=tk.BOTH, expand=True)
+        # Selected Stock Info
+        self.lbl_selected_stock = ttk.Label(trade_inner, text="Select a stock", font=(self.font_name, 14, "bold"), style="Card.TLabel")
+        self.lbl_selected_stock.pack(anchor="w", pady=(0, 10))
 
-        hist_columns = ("시간", "종목", "유형", "수량", "가격")
-        self.history_tree = ttk.Treeview(history_frame, columns=hist_columns, show='headings', height=10)
+        # Inputs
+        input_frame = ttk.Frame(trade_inner, style="Card.TFrame")
+        input_frame.pack(fill=tk.X, pady=(0, 15))
+        
+        ttk.Label(input_frame, text="Quantity", style="Card.TLabel").pack(side=tk.LEFT)
+        # Use tk.Entry for better color control in dark mode
+        entry = tk.Entry(input_frame, textvariable=self.shares_var, width=10, font=(self.font_name, 12),
+                         bg=self.COLOR_CARD, fg=self.COLOR_TEXT, insertbackground=self.COLOR_TEXT,
+                         relief="flat", highlightthickness=1, highlightbackground=self.COLOR_BORDER)
+        entry.pack(side=tk.RIGHT)
 
-        for col in hist_columns:
-            self.history_tree.heading(col, text=col)
-            self.history_tree.column(col, width=90)
+        # Buttons
+        btn_frame = ttk.Frame(trade_inner, style="Card.TFrame")
+        btn_frame.pack(fill=tk.X)
+        ttk.Button(btn_frame, text="Buy", style="Buy.TButton", command=self.buy_stock).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        ttk.Button(btn_frame, text="Sell", style="Sell.TButton", command=self.sell_stock).pack(side=tk.RIGHT, fill=tk.X, expand=True, padx=(5, 0))
 
-        self.history_tree.pack(fill=tk.BOTH, expand=True)
+        # Next Day Buttons
+        next_day_frame = ttk.Frame(trade_inner, style="Card.TFrame")
+        next_day_frame.pack(fill=tk.X, pady=(15, 0))
+        
+        ttk.Button(next_day_frame, text="+1 Day", command=lambda: self.next_turn(1)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 2))
+        ttk.Button(next_day_frame, text="+3 Days", command=lambda: self.next_turn(3)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=2)
+        ttk.Button(next_day_frame, text="+1 Week", command=lambda: self.next_turn(7)).pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(2, 0))
 
-        # 메뉴바
-        menubar = tk.Menu(self.root)
-        self.root.config(menu=menubar)
+        # News Panel
+        news_card = self._create_card(bottom_frame, "Market News")
+        news_card.pack(side=tk.RIGHT, fill=tk.BOTH, expand=True)
+        
+        self.news_text = scrolledtext.ScrolledText(news_card, height=10, bg=self.COLOR_BG, fg=self.COLOR_TEXT, 
+                                                   insertbackground="white", relief="flat", padx=10, pady=10)
+        self.news_text.pack(fill=tk.BOTH, expand=True, padx=2, pady=2)
 
-        file_menu = tk.Menu(menubar, tearoff=0)
-        menubar.add_cascade(label="파일", menu=file_menu)
-        file_menu.add_command(label="저장", command=self.save_game)
-        file_menu.add_command(label="불러오기", command=self.load_game)
-        file_menu.add_separator()
-        file_menu.add_command(label="종료", command=self.quit_app)
-
-        # 초기 업데이트
         self.update_all()
 
+    def _create_card(self, parent, title):
+        card = ttk.Frame(parent, style="Card.TFrame", padding=1) # Padding for border effect if needed
+        # Title Header
+        header = ttk.Frame(card, style="Card.TFrame", padding=(15, 10))
+        header.pack(fill=tk.X)
+        ttk.Label(header, text=title, style="SubHeader.TLabel").pack(side=tk.LEFT)
+        return card
+
     def update_all(self):
-        """모든 UI 업데이트"""
-        self.update_dashboard()
-        self.update_stock_list()
-        self.update_portfolio()
-        self.update_history()
-        self.update_trade_info()
-        # 현재 선택된 종목의 차트 업데이트
-        current_symbol = self.symbol_var.get()
-        if current_symbol:
-            self.update_chart(current_symbol)
+        # 1. Dashboard
+        pl = self.game.player
+        profit, pct = pl.get_profit_loss(self.game.stocks)
+        
+        self.dashboard_labels['total_assets'].config(text=f"${pl.get_total_assets(self.game.stocks):,.0f}")
+        self.dashboard_labels['cash'].config(text=f"${pl.cash:,.0f}")
+        
+        color = self.COLOR_ACCENT_UP if pct >= 0 else self.COLOR_ACCENT_DOWN
+        self.dashboard_labels['profit_percent'].config(text=f"{pct:+.2f}%", foreground=color)
+        self.dashboard_labels['game_time'].config(text=self.game.data_manager.get_current_date())
 
-    def update_dashboard(self):
-        """대시보드 업데이트"""
-        total_assets = self.game.player.get_total_assets(self.game.stocks)
-        profit, profit_percent = self.game.player.get_profit_loss(self.game.stocks)
-        invested = total_assets - self.game.player.cash
+        # 2. Stock List
+        for item in self.stock_tree.get_children(): self.stock_tree.delete(item)
+        for sym, stock in self.game.stocks.items():
+            # Determine color based on daily change
+            color_tag = "up" if stock.daily_change >= 0 else "down"
+            self.stock_tree.insert("", "end", values=(
+                sym, f"${stock.current_price:.2f}", f"{stock.daily_change_percent:+.2f}%", stock.get_recommendation_text()
+            ), tags=(color_tag,))
+        
+        self.stock_tree.tag_configure("up", foreground=self.COLOR_ACCENT_UP)
+        self.stock_tree.tag_configure("down", foreground=self.COLOR_ACCENT_DOWN)
 
-        self.dashboard_labels['total_assets'].config(text=f"${total_assets:,.2f}")
-        self.dashboard_labels['cash'].config(text=f"${self.game.player.cash:,.2f}")
-        self.dashboard_labels['invested'].config(text=f"${invested:,.2f}")
+        # 3. Portfolio
+        for item in self.port_tree.get_children(): self.port_tree.delete(item)
+        for p in pl.get_portfolio_summary(self.game.stocks):
+            color_tag = "up" if p['profit'] >= 0 else "down"
+            self.port_tree.insert("", "end", values=(
+                p['symbol'], p['shares'], f"${p['avg_price']:.2f}", f"{p['profit_percent']:+.2f}%"
+            ), tags=(color_tag,))
+        
+        self.port_tree.tag_configure("up", foreground=self.COLOR_ACCENT_UP)
+        self.port_tree.tag_configure("down", foreground=self.COLOR_ACCENT_DOWN)
 
-        profit_color = "green" if profit >= 0 else "red"
-        self.dashboard_labels['profit'].config(text=f"${profit:,.2f}", foreground=profit_color)
-        self.dashboard_labels['profit_percent'].config(
-            text=f"{profit_percent:+.2f}%", foreground=profit_color)
+        # 4. Chart & News
+        if self.symbol_var.get(): 
+            self.update_chart(self.symbol_var.get())
+            self.lbl_selected_stock.config(text=f"{self.symbol_var.get()}  ${self.game.stocks[self.symbol_var.get()].current_price:.2f}")
+        else:
+            self.lbl_selected_stock.config(text="Select a stock")
+            
+        self.refresh_news()
 
-        # 게임 시간 표시
-        game_time_str = self.game.current_time.strftime('%Y-%m-%d %H:%M')
-        self.dashboard_labels['game_time'].config(text=game_time_str)
-
-        # 시장 분위기 (백그라운드로 실행)
-        market_sentiment = self.game.market_news.get_market_sentiment()
-        self.dashboard_labels['market_sentiment'].config(text=market_sentiment)
-
-    def update_stock_list(self):
-        """주식 목록 업데이트"""
-        # 기존 항목 삭제
-        for item in self.stock_tree.get_children():
-            self.stock_tree.delete(item)
-
-        # 주식 추가
-        for symbol, stock in self.game.stocks.items():
-            change_color = "green" if stock.daily_change >= 0 else "red"
-            recommendation = stock.get_recommendation_text()
-
-            item = self.stock_tree.insert("", tk.END, values=(
-                symbol,
-                f"${stock.current_price:.2f}",
-                f"${stock.daily_change:+.2f}",
-                f"{stock.daily_change_percent:+.2f}%",
-                recommendation
-            ))
-
-            # 색상 태그
-            self.stock_tree.item(item, tags=(change_color,))
-
-        self.stock_tree.tag_configure("green", foreground="green")
-        self.stock_tree.tag_configure("red", foreground="red")
-
-    def update_portfolio(self):
-        """포트폴리오 업데이트"""
-        for item in self.portfolio_tree.get_children():
-            self.portfolio_tree.delete(item)
-
-        summary = self.game.player.get_portfolio_summary(self.game.stocks)
-
-        for item_data in summary:
-            profit_color = "green" if item_data['profit'] >= 0 else "red"
-
-            tree_item = self.portfolio_tree.insert("", tk.END, values=(
-                item_data['symbol'],
-                item_data['shares'],
-                f"${item_data['avg_price']:.2f}",
-                f"${item_data['current_price']:.2f}",
-                f"${item_data['profit']:+.2f}",
-                f"{item_data['profit_percent']:+.2f}%"
-            ))
-
-            self.portfolio_tree.item(tree_item, tags=(profit_color,))
-
-        self.portfolio_tree.tag_configure("green", foreground="green")
-        self.portfolio_tree.tag_configure("red", foreground="red")
-
-    def update_history(self):
-        """거래 히스토리 업데이트"""
-        for item in self.history_tree.get_children():
-            self.history_tree.delete(item)
-
-        # 최근 20개만 표시
-        for trade in self.game.player.trade_history[-20:]:
-            self.history_tree.insert("", 0, values=(  # 0으로 최상단 삽입
-                trade['timestamp'],
-                trade['symbol'],
-                trade['type'],
-                trade['shares'],
-                f"${trade['price']:.2f}"
-            ))
-
-    def update_trade_info(self, *args):
-        """거래 예상 금액 업데이트"""
-        try:
-            symbol = self.symbol_var.get()
-            shares = int(self.shares_var.get())
-
-            if symbol in self.game.stocks:
-                price = self.game.stocks[symbol].current_price
-                total = price * shares
-                self.trade_info_label.config(text=f"예상 금액: ${total:,.2f}")
-        except ValueError:
-            self.trade_info_label.config(text="수량을 입력하세요")
-
-    def on_stock_select(self, event):
-        """주식 목록에서 종목 선택 시 콤보박스에 반영"""
-        selection = self.stock_tree.selection()
-        if selection:
-            item = self.stock_tree.item(selection[0])
-            symbol = item['values'][0]  # 첫 번째 컬럼이 종목 심볼
-            self.symbol_var.set(symbol)
-            self.update_chart(symbol)
-
-    def update_chart(self, symbol: str):
-        """선택한 주식의 가격 차트 업데이트"""
-        if symbol not in self.game.stocks:
-            return
-
-        stock = self.game.stocks[symbol]
-
-        # 가격 히스토리가 충분하지 않으면 기본 차트 표시
-        if len(stock.price_history) < 2:
-            self.ax.clear()
-            self.ax.text(0.5, 0.5, f'{symbol}\n데이터 수집 중...\n"다음 날"을 클릭하세요',
-                        ha='center', va='center', fontsize=12)
-            self.ax.set_xlim(0, 1)
-            self.ax.set_ylim(0, 1)
-            self.canvas.draw()
-            return
-
-        # 가격 데이터 추출
-        times = []
-        time_labels = []
-        opens = []
-        highs = []
-        lows = []
-        closes = []
-
-        for idx, (t, data) in enumerate(stock.price_history):
-            time_obj = t if isinstance(t, datetime) else datetime.fromtimestamp(t)
-            times.append(idx)  # 인덱스 사용
-            time_labels.append(time_obj.strftime('%m/%d\n%H:%M'))  # 표시용 레이블
-
-            # OHLC 데이터 추출
-            if isinstance(data, dict):
-                opens.append(data['open'])
-                highs.append(data['high'])
-                lows.append(data['low'])
-                closes.append(data['close'])
-            else:
-                # 구버전 데이터 호환성
-                opens.append(data)
-                highs.append(data)
-                lows.append(data)
-                closes.append(data)
-
-        # 차트 그리기
+    def update_chart(self, symbol):
+        stock = self.game.stocks.get(symbol)
+        if not stock or not stock.price_history: return
+        
         self.ax.clear()
-
-        # 캔들스틱 차트 그리기
-        from matplotlib.patches import Rectangle
-
-        # 캔들 너비 (인덱스 기반이므로 0.8로 설정)
-        candle_width = 0.8
-
-        for i in range(len(times)):
-            x = times[i]
-
-            # 상승/하락 색상 결정
-            if closes[i] >= opens[i]:
-                color = 'red'  # 상승 (빨강)
-                body_color = 'red'
-            else:
-                color = 'blue'  # 하락 (파랑)
-                body_color = 'blue'
-
-            # 고가-저가 선 (꼬리)
-            self.ax.plot([x, x], [lows[i], highs[i]], color=color, linewidth=1.5)
-
-            # 시가-종가 박스 (몸통)
-            height = closes[i] - opens[i]
-
-            # 시가와 종가가 거의 같으면 작은 박스로 표시
-            if abs(height) < stock.current_price * 0.001:
-                # 십자형태로 표시
-                self.ax.plot([x - candle_width/2, x + candle_width/2], [opens[i], opens[i]],
-                        color=color, linewidth=2)
-            else:
-                rect = Rectangle((x - candle_width/2, opens[i]), candle_width, height,
-                            facecolor=body_color, edgecolor=body_color, alpha=0.9)
-                self.ax.add_patch(rect)
-
-        self.ax.set_title(f'{symbol} 주가 차트 (캔들스틱)', fontsize=12, fontweight='bold')
-        self.ax.set_xlabel('시간 경과 (틱)', fontsize=9)
-        self.ax.set_ylabel('가격 ($)', fontsize=9)
-        self.ax.grid(True, alpha=0.3, linestyle='--')
-
-        # X축 범위 조정 (캔들이 화면에 꽉 차도록)
-        if len(times) > 0:
-            self.ax.set_xlim(-0.5, len(times) - 0.5)
-
-        # X축 눈금 설정
-        if len(times) > 0:
-            # 적절한 간격으로 눈금 표시
-            if len(times) <= 10:
-                tick_positions = times
-                tick_labels = time_labels
-            else:
-                # 데이터가 많으면 간격을 띄워서 표시
-                step = max(1, len(times) // 8)
-                tick_positions = times[::step]
-                tick_labels = time_labels[::step]
-
-            self.ax.set_xticks(tick_positions)
-            self.ax.set_xticklabels(tick_labels, fontsize=8)
-
-        # 현재가 표시
-        if closes:
-            current_price = closes[-1]
-            self.ax.axhline(y=current_price, color='green', linestyle='--', alpha=0.7, linewidth=1.5)
-
-            # 현재가 텍스트를 차트 오른쪽에 표시
-            if len(times) > 0:
-                self.ax.text(len(times) - 0.5, current_price, f' ${current_price:.2f}',
-                            fontsize=9, color='green', verticalalignment='bottom', fontweight='bold')
-
-        self.fig.tight_layout()
+        dates = [x[0] for x in stock.price_history]
+        closes = [x[1]['close'] for x in stock.price_history]
+        
+        # Dark Theme Chart
+        self.ax.plot(dates, closes, label=symbol, color=self.COLOR_PRIMARY, linewidth=2)
+        self.ax.fill_between(dates, closes, alpha=0.1, color=self.COLOR_PRIMARY)
+        
+        self.ax.set_title(f"{symbol} Price chart", color=self.COLOR_TEXT, pad=10)
+        self.ax.tick_params(axis='x', colors=self.COLOR_TEXT_SUB)
+        self.ax.tick_params(axis='y', colors=self.COLOR_TEXT_SUB)
+        self.ax.spines['bottom'].set_color(self.COLOR_BORDER)
+        self.ax.spines['top'].set_color(self.COLOR_BORDER) 
+        self.ax.spines['left'].set_color(self.COLOR_BORDER)
+        self.ax.spines['right'].set_color(self.COLOR_BORDER)
+        self.ax.grid(True, color=self.COLOR_BORDER, linestyle='--', alpha=0.5)
+        
+        import matplotlib.dates as mdates
+        self.ax.xaxis.set_major_formatter(mdates.DateFormatter('%m/%d'))
+        self.ax.xaxis.set_major_locator(mdates.DayLocator(interval=max(1, len(dates)//5)))
+        self.fig.autofmt_xdate()
         self.canvas.draw()
 
     def refresh_news(self):
-        """뉴스 새로고침"""
+        self.news_text.config(state=tk.NORMAL) # Enable editing
         self.news_text.delete(1.0, tk.END)
+        for news in reversed(self.game.market_news.news_log[-15:]):
+            icon = "🔴" if news['sentiment'] == 'negative' else "🟢" if news['sentiment'] == 'positive' else "⚪"
+            
+            # Insert Headline
+            self.news_text.insert(tk.END, f"{icon} {news['headline']}\n", "headline")
+            
+            # Insert Details
+            self.news_text.insert(tk.END, f"   {news['datetime']} | {news['source']}\n\n", "details")
+            
+        # Configure tags for colors
+        self.news_text.tag_config("headline", foreground=self.COLOR_TEXT, font=(self.font_name, 10, "bold"))
+        self.news_text.tag_config("details", foreground=self.COLOR_TEXT_SUB, font=(self.font_name, 9))
+        self.news_text.config(state=tk.DISABLED) # Disable editing
 
-        # 보유 종목 뉴스 우선
-        symbols_to_check = list(self.game.player.portfolio.keys())[:3]  # 최대 3개
+    def show_game_result(self):
+        pl = self.game.player
+        profit, pct = pl.get_profit_loss(self.game.stocks)
+        total_assets = pl.get_total_assets(self.game.stocks)
+        
+        # Determine Tier
+        if pct >= 100: tier, icon = "주식의 신 - 당신은 워렌 버핏입니다", "👑"
+        elif pct >= 50: tier, icon = "수익률이 좋으시군요. 메로나 하나만 사주시길", "💎"
+        elif pct >= 20: tier, icon = "좋은 수익률입니다. 축하드립니다", "🥇"
+        elif pct >= 0: tier, icon = "흔한 투자자이시군요.", "🥈"
+        elif pct > -20: tier, icon = "당신은 주린이입니다. 광대가 되지 않게 조심하십시요.", "🥉"
+        else: tier, icon = "당신은 전인구입니다. 제발 당신의 계좌를 생각해서라도 주식은 하지 마십쇼", "💩"
+        
+        msg = (f"=== 2024 Season Finished ===\n\n"
+               f"Final Assets: ${total_assets:,.0f}\n"
+               f"Total Return: {pct:+.2f}%\n\n"
+               f"Your Rank: {icon} {tier}")
+        
+        messagebox.showinfo("Game Clear!", msg)
+        self.root.quit()
 
-        if not symbols_to_check:
-            symbols_to_check = [self.symbol_var.get()]
-
-        for symbol in symbols_to_check:
-            news_items = self.game.market_news.get_stock_news(symbol)
-
-            if news_items:
-                self.news_text.insert(tk.END, f"\n{'='*50}\n")
-                self.news_text.insert(tk.END, f"📌 {symbol} 관련 뉴스\n")
-                self.news_text.insert(tk.END, f"{'='*50}\n\n")
-
-                for news in news_items[:5]:  # 최대 5개
-                    sentiment_icon = {
-                        'positive': '🟢',
-                        'negative': '🔴',
-                        'neutral': '🟡'
-                    }.get(news['sentiment'], '⚪')
-
-                    self.news_text.insert(tk.END, f"{sentiment_icon} {news['headline']}\n")
-                    self.news_text.insert(tk.END, f"   {news['summary'][:100]}...\n")
-                    self.news_text.insert(tk.END, f"   출처: {news['source']} | ", "gray")
-
-                    news_time = datetime.fromtimestamp(news['datetime']).strftime('%Y-%m-%d %H:%M')
-                    self.news_text.insert(tk.END, f"{news_time}\n\n", "gray")
-
-        self.news_text.tag_config("gray", foreground="gray")
-
-    def buy_stock(self):
-        """주식 매수"""
-        try:
-            symbol = self.symbol_var.get()
-            shares = int(self.shares_var.get())
-
-            if shares <= 0:
-                messagebox.showwarning("입력 오류", "수량은 1 이상이어야 합니다.")
-                return
-
-            if symbol in self.game.stocks:
-                price = self.game.stocks[symbol].current_price
-
-                if self.game.player.buy_stock(symbol, shares, price):
-                    messagebox.showinfo("매수 성공",
-                        f"{symbol} {shares}주를 ${price:.2f}에 매수했습니다.")
-                    self.update_all()
-                    # 매수 후에도 게임 오버 체크
-                    self.check_game_over_status()
-                else:
-                    messagebox.showerror("매수 실패", "현금이 부족합니다.")
-        except ValueError:
-            messagebox.showwarning("입력 오류", "올바른 수량을 입력하세요.")
-
-    def sell_stock(self):
-        """주식 매도"""
-        try:
-            symbol = self.symbol_var.get()
-            shares = int(self.shares_var.get())
-
-            if shares <= 0:
-                messagebox.showwarning("입력 오류", "수량은 1 이상이어야 합니다.")
-                return
-
-            if symbol in self.game.stocks:
-                price = self.game.stocks[symbol].current_price
-
-                if self.game.player.sell_stock(symbol, shares, price):
-                    messagebox.showinfo("매도 성공",
-                        f"{symbol} {shares}주를 ${price:.2f}에 매도했습니다.")
-                    self.update_all()
-                    # 매도 후에도 게임 오버 체크
-                    self.check_game_over_status()
-                else:
-                    messagebox.showerror("매도 실패", "보유 수량이 부족합니다.")
-        except ValueError:
-            messagebox.showwarning("입력 오류", "올바른 수량을 입력하세요.")
-
-    def check_game_over_status(self):
-        """현재 자산 상태를 체크하여 게임 오버 여부 확인"""
-        if self.game.check_game_over():
-            total_assets = self.game.player.get_total_assets(self.game.stocks)
-            initial_cash = self.game.player.initial_cash
-            loss_percent = ((initial_cash - total_assets) / initial_cash) * 100
-
-            messagebox.showerror("게임 오버!",
-                f"💀 파산했습니다!\n\n"
-                f"총 자산: ${total_assets:,.2f}\n"
-                f"초기 자금: ${initial_cash:,.2f}\n"
-                f"손실률: {loss_percent:.2f}%\n\n"
-                f"자산이 초기 자금의 30% 이하로 떨어졌습니다.\n"
-                f"게임을 종료합니다.")
-            self.quit_app()
-
-    def next_tick(self):
-        """다음 시간대로 진행 (3시간 후)"""
-        is_game_over = self.game.next_tick()
-        current_time_str = self.game.current_time.strftime('%Y년 %m월 %d일 %H:%M')
-
-        if is_game_over:
-            total_assets = self.game.player.get_total_assets(self.game.stocks)
-            initial_cash = self.game.player.initial_cash
-            loss_percent = ((initial_cash - total_assets) / initial_cash) * 100
-
-            messagebox.showerror("게임 오버!",
-                f"💀 파산했습니다!\n\n"
-                f"총 자산: ${total_assets:,.2f}\n"
-                f"초기 자금: ${initial_cash:,.2f}\n"
-                f"손실률: {loss_percent:.2f}%\n\n"
-                f"자산이 초기 자금의 30% 이하로 떨어졌습니다.\n"
-                f"게임을 종료합니다.")
-            self.quit_app()
-            return
-
-        messagebox.showinfo("시간 경과", f"{current_time_str}로 진행되었습니다!")
-        self.update_all()
-        self.refresh_news()
-
-    def save_game(self):
-        """게임 저장"""
-        self.game.save_game()
-        messagebox.showinfo("저장 완료", "게임이 저장되었습니다.")
-
-    def load_game(self):
-        """게임 불러오기"""
-        if self.game.load_game():
-            messagebox.showinfo("불러오기 완료", "게임을 불러왔습니다.")
-            self.update_all()
-        else:
-            messagebox.showerror("불러오기 실패", "저장 파일을 찾을 수 없습니다.")
-
-    def start_auto_update(self):
-        """자동 업데이트 시작 (30초마다)"""
-        def auto_update():
-            while self.running:
-                time.sleep(30)
-                if self.running:
-                    # 주가만 업데이트 (UI는 메인 스레드에서)
-                    for stock in self.game.stocks.values():
-                        stock.update_price()
-
-                    # UI 업데이트는 메인 스레드에서
-                    self.root.after(0, self.update_stock_list)
-                    self.root.after(0, self.update_portfolio)
-                    self.root.after(0, self.update_dashboard)
-
-        self.update_thread = threading.Thread(target=auto_update, daemon=True)
-        self.update_thread.start()
-
-    def quit_app(self):
-        """앱 종료"""
-        if messagebox.askyesno("종료", "게임을 종료하시겠습니까?"):
-            self.running = False
+    def next_turn(self, days=1):
+        is_over, is_end = self.game.next_turn(days)
+        if is_over: 
+            messagebox.showinfo("게임오버", "파산!")
             self.root.quit()
+        elif is_end: 
+            self.show_game_result()
+        else: 
+            self.update_all()
 
+    def buy_stock(self): self._trade(True)
+    def sell_stock(self): self._trade(False)
 
-# ========== 9. 메인 실행 ==========
-def main():
-    """메인 함수"""
-    # API 키 확인
-    if FINNHUB_API_KEY == "YOUR_API_KEY_HERE":
-        root = tk.Tk()
-        root.withdraw()
-        messagebox.showwarning("API 키 필요",
-            "Finnhub API 키를 설정해주세요!\n\n"
-            "1. https://finnhub.io/ 에서 무료 가입\n"
-            "2. API Key 복사\n"
-            "3. 코드 상단의 FINNHUB_API_KEY 변수에 붙여넣기\n\n"
-            "현재는 시뮬레이션 모드로 실행됩니다.")
-        root.destroy()
+    def _trade(self, is_buy):
+        sym = self.symbol_var.get()
+        try: shares = int(self.shares_var.get())
+        except: return
+        if not sym or shares < 1: return
+        
+        price = self.game.stocks[sym].current_price
+        success = self.game.player.buy_stock(sym, shares, price) if is_buy else self.game.player.sell_stock(sym, shares, price)
+        
+        if success: 
+            self.update_all()
+            # messagebox.showinfo("Success", f"{'Buy' if is_buy else 'Sell'} Complete!") # Removed popup for smoother flow
+        else: messagebox.showerror("Failed", "Insufficient funds or shares")
 
-    # API 및 게임 엔진 초기화
-    api = FinnhubAPI(FINNHUB_API_KEY)
-    game_engine = GameEngine(api)
+    def on_stock_select(self, e):
+        sel = self.stock_tree.selection()
+        if sel: 
+            sym = self.stock_tree.item(sel[0])['values'][0]
+            self.symbol_var.set(sym)
+            self.update_all() # Update chart and selected label
 
-    # GUI 실행
-    root = tk.Tk()
-    app = StockTradingGUI(root, game_engine)
+    def on_port_select(self, e):
+        sel = self.port_tree.selection()
+        if sel:
+            sym = self.port_tree.item(sel[0])['values'][0]
+            self.symbol_var.set(sym)
+            self.update_all()
 
-    # 시작 시 뉴스 로드
-    root.after(1000, app.refresh_news)
-
-    root.mainloop()
-
-
+# ========== 9. Main Execution ==========
 if __name__ == "__main__":
-    main()
+    game = GameEngine()
+    root = tk.Tk()
+    
+    # Set window background immediately to avoid white flash
+    root.configure(bg="#191919")
+    
+    app = StockTradingGUI(root, game)
+    root.mainloop()
